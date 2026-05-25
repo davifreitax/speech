@@ -1,0 +1,146 @@
+version: '3.8'
+
+services:
+  # =============================================
+  # API Principal - Spring Boot
+  # =============================================
+  speech-api:
+    build: .
+    container_name: speech-api
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/speechdb
+      SPRING_DATASOURCE_USERNAME: speechuser
+      SPRING_DATASOURCE_PASSWORD: speechpass
+      MONGO_URI: mongodb://mongo:27017/speechdb
+      JWT_SECRET: minha-chave-secreta-super-segura-producao-2024
+      TRANSCRIPTION_SERVICE_URL: http://transcription-service:8001
+      TTS_SERVICE_URL: http://tts-service:8002
+      MCP_SERVER_URL: http://mcp-server:8003
+      MCP_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    networks:
+      - speech-network
+    restart: unless-stopped
+
+  # =============================================
+  # PostgreSQL - Dados dos usuários (JPA)
+  # =============================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: speech-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: speechdb
+      POSTGRES_USER: speechuser
+      POSTGRES_PASSWORD: speechpass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U speechuser -d speechdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - speech-network
+
+  # =============================================
+  # MongoDB - Transcrições (documentos)
+  # =============================================
+  mongo:
+    image: mongo:7-jammy
+    container_name: speech-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - speech-network
+
+  # =============================================
+  # Microserviço de Transcrição (Python/Whisper)
+  # Substitua pela sua imagem Python real
+  # =============================================
+  transcription-service:
+    image: python:3.11-slim
+    container_name: transcription-service
+    ports:
+      - "8001:8001"
+    command: >
+      sh -c "pip install fastapi uvicorn openai-whisper python-multipart &&
+             python -c \"
+import uvicorn
+from fastapi import FastAPI, UploadFile, File
+app = FastAPI()
+
+@app.post('/transcribe')
+async def transcribe(audio: UploadFile = File(...), language: str = 'pt'):
+    return {'jobId': 'mock-001', 'text': 'Transcrição simulada do áudio enviado.', 
+            'language': language, 'confidence': 0.95, 'durationSeconds': 5.2, 'status': 'completed'}
+
+@app.get('/models')
+def models():
+    return {'models': ['tiny', 'base', 'small', 'medium', 'large']}
+
+uvicorn.run(app, host='0.0.0.0', port=8001)
+             \""
+    networks:
+      - speech-network
+
+  # =============================================
+  # Microserviço TTS (Python)
+  # =============================================
+  tts-service:
+    image: python:3.11-slim
+    container_name: tts-service
+    ports:
+      - "8002:8002"
+    command: >
+      sh -c "pip install fastapi uvicorn gtts &&
+             python -c \"
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import Response
+app = FastAPI()
+
+@app.post('/synthesize')
+async def synthesize(body: dict):
+    from gtts import gTTS
+    import io
+    tts = gTTS(text=body.get('text',''), lang=body.get('language','pt')[:2])
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    return Response(content=fp.getvalue(), media_type='audio/mpeg')
+
+@app.get('/voices')
+def voices():
+    return {'voices': [{'id': 'pt-BR-Standard-A', 'name': 'Padrão PT-BR', 'language': 'pt-BR', 'gender': 'F'}]}
+
+@app.get('/health')
+def health():
+    return {'status': 'ok', 'version': '1.0.0'}
+
+uvicorn.run(app, host='0.0.0.0', port=8002)
+             \""
+    networks:
+      - speech-network
+
+volumes:
+  postgres_data:
+  mongo_data:
+
+networks:
+  speech-network:
+    driver: bridge
